@@ -1,0 +1,21 @@
+# Host-specific values
+.env
+
+# Alerting credentials — only the .example is tracked
+secrets/*
+!secrets/alerting.yaml.example
+
+# The monitored services of a given host. Tracked: only the example.
+# Remove these two lines if you want your endpoint list versioned here —
+# but remember this repository is public.
+endpoints/*
+!endpoints/services.yaml.example
+
+# Validated copy that Gatus actually reads (make apply)
+live/
+
+# Rendered Traefik route
+traefik/status.yml
+
+*.log
+*.tmp

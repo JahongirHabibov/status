@@ -1,0 +1,92 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Gatus status page — runs under ROOTLESS Docker as the unprivileged user
+# `gatus`. See README.md for the security model and the one-time host setup.
+#
+#   make setup && make up
+#
+# Why rootless and not the shared (rootful) Docker daemon: membership in the
+# `docker` group is root on the host. A user that can talk to the rootful daemon
+# can mount `/` into a container. The `gatus` user owns its own daemon instead,
+# so a compromised account — or a container escape — ends at an unprivileged
+# uid, not at root.
+#
+# Consequence: Traefik (rootful daemon) cannot see this container through its
+# Docker provider. Gatus therefore publishes one port on a host address Traefik
+# can reach (GATUS_BIND, default docker0 = 172.17.0.1), and the route comes from
+# Traefik's file provider (traefik/status.yml.tmpl, installed by `make route`).
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: status
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+    tag: "{{.Name}}"
+
+services:
+  gatus:
+    # Pinned. Upgrade deliberately: read the release notes, bump, `make up`.
+    image: ghcr.io/twin/gatus:${GATUS_VERSION:-v5.38.0}
+    container_name: gatus
+    restart: unless-stopped
+
+    # ── Hardening ──────────────────────────────────────────────────────────
+    # The upstream image is FROM scratch with no USER line: without this it
+    # would run as uid 0 inside the container. 65534 = nobody. Under rootless
+    # Docker that maps to a subordinate uid of `gatus` on the host — two layers
+    # away from root.
+    user: "65534:65534"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+
+    environment:
+      # A DIRECTORY: Gatus merges every *.yaml / *.yml below it. Directory
+      # binds also survive git replacing a file (a single-file bind pins the
+      # old inode and silently stops hot-reloading — Gatus issue #151).
+      # NOT /config: the image ships a demo /config/config.yaml, which would be
+      # merged in and put a dozen foreign endpoints on the page.
+      GATUS_CONFIG_PATH: /etc/gatus
+      GATUS_LOG_LEVEL: ${GATUS_LOG_LEVEL:-INFO}
+      # Referenced from config/*.yaml as ${STATUS_DOMAIN} / ${STATUS_TITLE}.
+      STATUS_DOMAIN: ${STATUS_DOMAIN:?set STATUS_DOMAIN in .env}
+      STATUS_TITLE: ${STATUS_TITLE:-Status}
+
+    volumes:
+      # live/ = config/ + endpoints/ + secrets/ as last VALIDATED by
+      # `make apply`. Gatus hot-reloads whatever it reads, and an invalid file
+      # takes it down — so it never reads the files you edit, only this copy.
+      # Read-only: a compromised Gatus can neither rewrite its checks nor
+      # redirect its alerts. Alerting credentials arrive as a FILE
+      # (secrets/alerting.yaml), never as an environment variable — those
+      # show in `docker inspect`.
+      - ./live:/etc/gatus:ro
+      # SQLite history — the only writable path.
+      - gatus-data:/data
+
+    # The host stub resolver (127.0.0.53) is not reachable from a container
+    # namespace; same reason the proxy pins these for Traefik.
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+
+    # Bound to ONE host address, never 0.0.0.0. Default is the rootful
+    # daemon's docker0 gateway, which Traefik reaches from proxy-network.
+    ports:
+      - "${GATUS_BIND:-172.17.0.1}:${GATUS_PORT:-18080}:8080"
+
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 128M
+          pids: 128
+
+    logging: *default-logging
+
+volumes:
+  gatus-data:
+    name: gatus-data

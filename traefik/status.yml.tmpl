@@ -1,0 +1,31 @@
+# Traefik file-provider route for the status page.
+#
+# Rendered by `make route-render` (values from .env) and installed into the
+# proxy's file-provider directory — the `traefik-dynamic` volume — by
+# `make route-install`, which an ADMIN with access to the rootful Docker daemon
+# runs once. The `gatus` user cannot do that, by design.
+#
+# Why a file and not container labels: Traefik reads labels from the rootful
+# daemon; this container lives in the rootless daemon of `gatus`.
+
+http:
+  routers:
+    status:
+      rule: "Host(`${STATUS_DOMAIN}`)"
+      entryPoints:
+        - websecure
+      service: status
+      middlewares:
+        - security-headers@file
+        - compress@file
+        - rate-limit@file
+      tls:
+        certResolver: letsencrypt
+
+  services:
+    status:
+      loadBalancer:
+        # No healthCheck: with a single server it can only turn a short Gatus
+        # restart into up to one check interval of 503 (measured).
+        servers:
+          - url: "http://${GATUS_BIND}:${GATUS_PORT}"

@@ -1,0 +1,59 @@
+# Core configuration. Merged with every *.yaml under endpoints/ and secrets/
+# (GATUS_CONFIG_PATH is a directory; maps deep-merge, lists append, scalars may
+# be defined only once across all files).
+#
+# ${VAR} is substituted from the container environment (docker-compose.yml).
+# A literal `$` must be written as `$$`.
+
+web:
+  address: 0.0.0.0
+  port: 8080
+
+storage:
+  type: sqlite
+  path: /data/gatus.db
+  caching: true
+
+ui:
+  title: "${STATUS_TITLE}"
+  header: "${STATUS_TITLE}"
+  dashboard-heading: "${STATUS_TITLE}"
+  dashboard-subheading: "Availability of services, checked continuously"
+  default-sort-by: group
+  dark-mode: true
+
+# If this host itself loses the internet, pause every check instead of
+# flagging every endpoint as down (and alerting on all of them).
+connectivity:
+  checker:
+    target: 1.1.1.1:53
+    interval: 60s
+
+# Default (3). Keeps [RESPONSE_TIME] meaningful; slow checks get long intervals.
+concurrency: 3
+
+# Measured with v5.38.0, both values:
+#   true  — on an invalid reload Gatus first stops its web server and every
+#           check, then rejects the file and never starts them again. The
+#           container stays "running" with no page, no checks, no alerts.
+#   false — it panics and Docker restarts it: visible, and it recovers as soon
+#           as the file is fixed.
+# So `false`, and invalid files never reach Gatus in the first place: it reads
+# live/, which only `make apply` writes, after `make validate` has passed.
+skip-invalid-config-update: false
+
+# Prometheus metrics stay off: /metrics would be public through Traefik.
+metrics: false
+
+endpoints:
+  # The page checks itself the way a visitor reaches it: public DNS, Traefik,
+  # Let's Encrypt certificate, back to this container. Also catches a broken
+  # route or a certificate that stopped renewing.
+  - name: Status page
+    group: status
+    url: "https://${STATUS_DOMAIN}/health"
+    interval: 5m
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY].status == UP"
+      - "[CERTIFICATE_EXPIRATION] > 240h"

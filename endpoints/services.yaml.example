@@ -1,0 +1,69 @@
+# Copy to endpoints/services.yaml (or split into several *.yaml files — every
+# file in this directory is merged) and list the services of this host.
+#
+# Anchors (&default) work only within ONE file; Gatus merges files after YAML
+# parsing.
+#
+# The page is public. What a visitor sees per endpoint: name, group, status
+# history, response time — and, unless hidden below, the URL, host, port and
+# raw error messages. Hide what you would not print on a poster.
+
+x-defaults: &default
+  interval: 2m
+  client:
+    timeout: 10s
+  ui:
+    hide-url: true
+    hide-hostname: true
+    hide-port: true
+    # Errors may contain internal addresses or upstream messages.
+    hide-errors: true
+  alerts:
+    # Ignored silently unless secrets/alerting.yaml configures telegram.
+    - type: telegram
+
+endpoints:
+  # ── A website ──────────────────────────────────────────────────────────────
+  - name: Website
+    group: example.com
+    <<: *default
+    url: "https://example.com/"
+    conditions:
+      - "[STATUS] == 200"
+      - "[RESPONSE_TIME] < 2000"
+      - "[CERTIFICATE_EXPIRATION] > 240h"
+
+  # ── An API with a JSON health endpoint ─────────────────────────────────────
+  - name: API
+    group: example.com
+    <<: *default
+    url: "https://api.example.com/health"
+    interval: 1m
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY].status == ok"
+
+  # ── A service behind BasicAuth: 401 means "up and guarded" ─────────────────
+  - name: Package repository
+    group: example.com
+    <<: *default
+    url: "https://apt.example.com/dists/stable/InRelease"
+    conditions:
+      - "[STATUS] == 401"
+
+  # ── A plain TCP port (SSH, SMTP, …) ────────────────────────────────────────
+  - name: SSH
+    group: infrastructure
+    <<: *default
+    url: "tcp://example.com:22"
+    conditions:
+      - "[CONNECTED] == true"
+
+  # ── Domain registration — interval must be >= 5m (WHOIS/RDAP rate limits) ──
+  - name: Domain example.com
+    group: infrastructure
+    <<: *default
+    url: "https://example.com/"
+    interval: 12h
+    conditions:
+      - "[DOMAIN_EXPIRATION] > 720h"
