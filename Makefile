@@ -4,7 +4,8 @@ SHELL := /bin/bash
 # Two roles, kept apart on purpose (see README.md, "Security model"):
 #
 #   user `gatus`  setup, check, validate, apply, up, down, restart, logs, ps,
-#                 update → talks ONLY to its own rootless Docker daemon
+#                 update, docker-install, docker-update
+#                 → talks ONLY to its own rootless Docker daemon
 #
 #   admin         route-render, route-install, route-remove
 #                 → talks to the rootful daemon that runs Traefik; run once
@@ -30,6 +31,7 @@ LOAD_ENV := while IFS= read -r line || [ -n "$$line" ]; do \
 	done < .env
 
 .PHONY: setup check validate apply up down restart logs ps update \
+        docker-install docker-update \
         route-render route-install route-remove \
         _require-env _require-rootless _require-rootful
 
@@ -62,6 +64,9 @@ check: _require-env _require-rootless
 		done; echo "yaml: parses"; \
 	else echo "yaml: yq not installed — skipped here, 'make validate' catches syntax errors too"; fi
 	@docker compose config --quiet && echo "compose: valid"
+	@if [ -x "$$HOME/bin/dockerd" ]; then \
+		echo "rootless docker: $$("$$HOME/bin/dockerd" --version | cut -d, -f1) (static build — no apt updates, run 'make docker-update' regularly)"; \
+	fi
 
 # Gatus has no "check config" flag, so this starts it once, throwaway, with the
 # exact config the service will read, and waits for the first of two log lines:
@@ -135,6 +140,49 @@ ps: _require-rootless
 # recreated only if the compose file or the image version changed.
 update: _require-rootless
 	git pull --ff-only
+	@$(MAKE) --no-print-directory up
+
+# ── rootless Docker itself, on docker.io hosts (static build in ~/bin) ──────
+#
+# Ubuntu's docker.io has no rootless mode, so the service user installs Docker's
+# own static rootless build into ~/bin with Docker's official installer. It
+# touches nothing outside this user's home; the rootful daemon keeps running.
+# On docker-ce hosts use `dockerd-rootless-setuptool.sh install` instead —
+# updates then come with apt.
+DOCKER_INSTALLER := https://get.docker.com/rootless
+
+docker-install:
+	@[ "$$(id -u)" != "0" ] || { echo "REFUSING: run as the service user, not root"; exit 1; }
+	@! dpkg -s docker-ce-rootless-extras >/dev/null 2>&1 \
+		|| { echo "docker-ce-rootless-extras is installed — use: dockerd-rootless-setuptool.sh install"; exit 1; }
+	@tmp=$$(mktemp); trap 'unlink "$$tmp"' EXIT; \
+	curl -fsSL $(DOCKER_INSTALLER) -o "$$tmp"; \
+	echo "installer $$(grep -m1 '^SCRIPT_COMMIT_SHA=' "$$tmp"), $$(grep -m1 '^STABLE_LATEST=' "$$tmp")"; \
+	sh "$$tmp"
+	@echo
+	@echo "Next: log out and back in (puts ~/bin on PATH), then:"
+	@echo "  docker context use rootless && make check"
+
+# Docker's documented upgrade path for this install: stop the daemon, move
+# ~/bin/dockerd out of the way, run the installer again. The old dockerd is
+# kept until the new one is in place, and put back if the install fails.
+# Gatus is down for the length of the update.
+docker-update:
+	@[ "$$(id -u)" != "0" ] || { echo "REFUSING: run as the service user, not root"; exit 1; }
+	@test -x "$$HOME/bin/dockerd" \
+		|| { echo "no static rootless Docker in ~/bin — on docker-ce hosts, apt updates it"; exit 1; }
+	@echo "current: $$("$$HOME/bin/dockerd" --version)"
+	systemctl --user stop docker
+	@mv "$$HOME/bin/dockerd" "$$HOME/bin/dockerd.previous"
+	@if $(MAKE) --no-print-directory docker-install; then \
+		unlink "$$HOME/bin/dockerd.previous"; \
+	else \
+		echo "install failed — restoring the previous dockerd"; \
+		mv "$$HOME/bin/dockerd.previous" "$$HOME/bin/dockerd"; \
+		systemctl --user start docker; exit 1; \
+	fi
+	systemctl --user start docker
+	@echo "now: $$("$$HOME/bin/dockerd" --version)"
 	@$(MAKE) --no-print-directory up
 
 # ── admin (rootful daemon, where Traefik runs) ──────────────────────────────

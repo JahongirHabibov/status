@@ -8,7 +8,9 @@
 # no membership in the `docker` group — ever.
 #
 # What it does:
-#   1. installs the packages rootless Docker needs (Debian/Ubuntu)
+#   1. installs the packages rootless Docker needs (Debian/Ubuntu); on a
+#      docker.io host the rootless daemon itself comes later, from Docker's
+#      static build, installed by the service user (`make docker-install`)
 #   2. creates the service user with a locked password and a 0700 home
 #   3. checks it has subordinate uid/gid ranges (user namespaces)
 #   4. on Ubuntu >= 23.10: allows rootlesskit to create user namespaces
@@ -37,21 +39,41 @@ command -v apt-get >/dev/null || fail "only Debian/Ubuntu are supported by this 
 
 # ── 1. packages ─────────────────────────────────────────────────────────────
 say "packages"
-# Rootless mode ships only with Docker's own packages (docker-ce +
-# docker-ce-rootless-extras). Ubuntu's `docker.io` has no rootless setup tool,
-# and mixing it with docker-ce-rootless-extras conflicts — so stop here and say
-# so instead of half-installing.
-if ! dpkg -s docker-ce >/dev/null 2>&1; then
-	if dpkg -s docker.io >/dev/null 2>&1; then
-		fail "this host runs Ubuntu's docker.io, which has no rootless mode. Switch to docker-ce from Docker's apt repository first (https://docs.docker.com/engine/install/) — that restarts every container on the host, so plan it."
-	fi
-	fail "docker-ce is not installed"
+# Two ways to get rootless Docker, picked by what the host already runs. The
+# rootful daemon (Traefik and the sites) is touched by neither.
+#
+#   docker-ce (Docker's apt repo) → docker-ce-rootless-extras from apt;
+#       updates come with apt.
+#   docker.io (Ubuntu's package)  → it has no rootless mode, and adding
+#       docker-ce-rootless-extras would conflict with it. The service user
+#       installs Docker's static rootless build into ~/bin instead
+#       (`make docker-install`, README step 5). Updates are manual:
+#       `make docker-update`.
+if dpkg -s docker-ce >/dev/null 2>&1; then
+	MODE=package
+elif dpkg -s docker.io >/dev/null 2>&1; then
+	MODE=static
+else
+	fail "neither docker-ce nor docker.io is installed — this script prepares a host that already runs the Traefik proxy"
 fi
+echo "rootless via: $MODE install"
+
 apt-get update -qq
-apt-get install -y -qq uidmap dbus-user-session systemd-container slirp4netns \
-	docker-ce-rootless-extras gettext-base >/dev/null
-command -v dockerd-rootless-setuptool.sh >/dev/null \
-	|| fail "dockerd-rootless-setuptool.sh not found — is docker-ce from Docker's apt repo installed?"
+common=(uidmap dbus-user-session systemd-container slirp4netns iptables gettext-base curl)
+if [ "$MODE" = package ]; then
+	apt-get install -y -qq "${common[@]}" docker-ce-rootless-extras >/dev/null
+	command -v dockerd-rootless-setuptool.sh >/dev/null \
+		|| fail "dockerd-rootless-setuptool.sh not found after installing docker-ce-rootless-extras"
+else
+	apt-get install -y -qq "${common[@]}" >/dev/null
+	# The static build brings its own docker CLI but no compose plugin; the CLI
+	# also looks in the system plugin directories.
+	if ! [ -x /usr/libexec/docker/cli-plugins/docker-compose ] \
+		&& ! [ -x /usr/lib/docker/cli-plugins/docker-compose ]; then
+		apt-get install -y -qq docker-compose-v2 >/dev/null
+	fi
+fi
+echo "installed: ${common[*]}"
 
 # ── 2. service user ─────────────────────────────────────────────────────────
 say "user $SERVICE_USER"
@@ -64,6 +86,7 @@ fi
 passwd -l "$SERVICE_USER" >/dev/null   # no password login, ever
 home="$(getent passwd "$SERVICE_USER" | cut -d: -f6)"
 chmod 700 "$home"
+if [ "$MODE" = package ]; then ROOTLESSKIT=/usr/bin/rootlesskit; else ROOTLESSKIT="$home/bin/rootlesskit"; fi
 
 for g in docker sudo adm; do
 	if id -nG "$SERVICE_USER" | tr ' ' '\n' | grep -qx "$g"; then
@@ -81,23 +104,28 @@ echo "present"
 # ── 4. AppArmor (Ubuntu 23.10+) ─────────────────────────────────────────────
 say "apparmor"
 if [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" = 1 ]; then
-	profile=/etc/apparmor.d/usr.bin.rootlesskit
+	# One profile for exactly the rootlesskit binary this mode uses — Docker's
+	# documented approach for Ubuntu 24.04. Named after the path:
+	# /home/gatus/bin/rootlesskit → home.gatus.bin.rootlesskit. Path-based, so it
+	# may exist before the binary does.
+	name="$(printf '%s' "$ROOTLESSKIT" | sed -e 's@^/@@' -e 's@/@.@g')"
+	profile="/etc/apparmor.d/$name"
 	if [ ! -f "$profile" ]; then
-		cat > "$profile" <<'EOF'
+		cat > "$profile" <<EOF
 # Allows rootlesskit (rootless Docker) to create user namespaces.
 abi <abi/4.0>,
 include <tunables/global>
 
-/usr/bin/rootlesskit flags=(unconfined) {
+"$ROOTLESSKIT" flags=(unconfined) {
   userns,
 
-  include if exists <local/usr.bin.rootlesskit>
+  include if exists <local/$name>
 }
 EOF
 		apparmor_parser -r "$profile"
-		echo "profile installed"
+		echo "profile installed: $profile"
 	else
-		echo "profile already present"
+		echo "profile already present: $profile"
 	fi
 else
 	echo "unprivileged userns not restricted — nothing to do"
@@ -143,9 +171,15 @@ else
 fi
 
 say "done"
+if [ "$MODE" = package ]; then
+	install_cmd="dockerd-rootless-setuptool.sh install"
+else
+	install_cmd="make docker-install"
+fi
 cat <<EOF
-Next, as $SERVICE_USER (README.md, "Install rootless Docker"):
+Next, as $SERVICE_USER (README.md, step 5):
 
     sudo machinectl shell $SERVICE_USER@
-    dockerd-rootless-setuptool.sh install
+    git clone https://github.com/JahongirHabibov/status.git ~/status && cd ~/status
+    $install_cmd
 EOF

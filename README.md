@@ -63,8 +63,14 @@ with the new files and seen it accept them. Editing `endpoints/` or running
 
 ## Requirements
 
-- Debian or Ubuntu with `docker-ce` from Docker's apt repository. Ubuntu's own
-  `docker.io` package has no rootless mode, and `host-setup.sh` stops on it.
+- Debian or Ubuntu running Docker for the proxy, either variant. The rootful
+  daemon is never touched:
+  - **`docker-ce`** (Docker's apt repository): rootless Docker comes from the
+    `docker-ce-rootless-extras` package and is updated by apt.
+  - **`docker.io`** (Ubuntu's package): it has no rootless mode. The `gatus`
+    user installs Docker's static rootless build into `~/bin` with Docker's
+    official installer. ⚠️ apt does not update that build, so run
+    `make docker-update` regularly. `make check` prints its version.
 - The Traefik proxy on the same host: the `proxy-network` network, the
   `traefik-dynamic` file-provider volume, the `letsencrypt` resolver, and the
   middlewares `security-headers@file`, `compress@file` and `rate-limit@file`
@@ -87,29 +93,47 @@ Check: `dig +short status.example.com` returns the public IP.
 ### 2. Prepare the host (admin, once)
 
 ```bash
-git clone https://github.com/JahongirHabibov/status.git /tmp/status-setup
-sudo /tmp/status-setup/scripts/host-setup.sh gatus
+git clone https://github.com/JahongirHabibov/status.git ~/status   # the admin's checkout, reused in step 6
+sudo ~/status/scripts/host-setup.sh gatus
 ```
 
-The script installs the rootless prerequisites and creates the locked user
-`gatus`. On Ubuntu 23.10 and later it adds an AppArmor profile for
-`rootlesskit`. It also enables lingering, delegates the cgroup controllers the
+The script detects `docker-ce` or `docker.io`, installs the rootless
+prerequisites and creates the locked user `gatus`. On Ubuntu 23.10 and later it
+adds an AppArmor profile for exactly the `rootlesskit` binary that mode uses. It also enables lingering, delegates the cgroup controllers the
 container's CPU limit needs, and, if UFW is active, allows the Docker bridges to
 reach `172.17.0.1:18080`. Read it before you run it. It is idempotent.
 
 If the rootful daemon's `docker0` does not use `172.17.0.1`
 (`ip -4 -o addr show docker0`), pass the real address through sudo:
-`sudo GATUS_BIND=<addr> /tmp/status-setup/scripts/host-setup.sh gatus`, and use
+`sudo GATUS_BIND=<addr> ~/status/scripts/host-setup.sh gatus`, and use
 the same value in `.env` in steps 4 and 6.
 
 ### 3. Install rootless Docker (as `gatus`)
 
 ```bash
 sudo machinectl shell gatus@          # a real login session (systemd --user, XDG_RUNTIME_DIR)
+git clone https://github.com/JahongirHabibov/status.git ~/status
+cd ~/status
+```
+
+Then, depending on the host's Docker (`host-setup.sh` printed which):
+
+```bash
+# docker.io host — Docker's static rootless build into ~/bin
+make docker-install
+exit                                  # log in again so ~/bin is on PATH
+sudo machinectl shell gatus@
+
+# docker-ce host — from the package
 dockerd-rootless-setuptool.sh install
-systemctl --user enable --now docker
+```
+
+Both ways end the same:
+
+```bash
 docker context use rootless
 docker info --format '{{.SecurityOptions}}'   # must contain name=rootless
+systemctl --user is-enabled docker            # enabled  (starts at boot, via linger)
 ```
 
 Use `machinectl shell`, not `sudo -iu gatus`: the latter starts no systemd user
@@ -118,8 +142,7 @@ session, and the rootless daemon cannot start without one.
 ### 4. Deploy (as `gatus`)
 
 ```bash
-git clone https://github.com/JahongirHabibov/status.git ~/status
-cd ~/status
+cd ~/status                                          # cloned in step 3
 cp .env.example .env                                 # set STATUS_DOMAIN, check GATUS_BIND
 cp endpoints/services.yaml.example endpoints/services.yaml   # list your services
 make setup                                           # data volume, owned by uid 65534
@@ -149,7 +172,7 @@ file in its file-provider directory. Run this from the **admin's** checkout,
 with an `.env` carrying the same `STATUS_DOMAIN`, `GATUS_BIND` and `GATUS_PORT`:
 
 ```bash
-cd ~/projects/proxy/external_repos/status   # the admin's checkout
+cd ~/status                                 # the admin's checkout from step 2
 cp .env.example .env && nano .env
 make route-install
 ```
@@ -186,6 +209,7 @@ visitor reaches it: public DNS, Traefik, certificate validity.
 | Only check a change | `gatus` | `make validate` |
 | Pull repository changes | `gatus` | `make update` |
 | Upgrade Gatus | `gatus` | set `GATUS_VERSION` in `.env`, `make up` |
+| Update rootless Docker (docker.io hosts) | `gatus` | `make docker-update`; the page is down while it runs |
 | Post an incident notice | `gatus` | `announcements:` in a file under `endpoints/` |
 | Silence alerts during work | `gatus` | `maintenance:` or per-endpoint `maintenance-windows:` |
 | Stop / start | `gatus` | `make down` / `make up` |
